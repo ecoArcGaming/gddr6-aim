@@ -1,0 +1,100 @@
+{% set FREQ_GHZ = FREQ_GHZ | default(1.0) %}
+
+arch:
+  nodes:
+  # Shared Main Memory: DRAM
+  - !Memory
+    name: MainMemory
+    size: 8 * 1024 * 1024 * 1024 * 8 # 8 GB DRAM
+    leak_power: 0
+    area: 0
+    actions:
+    - {name: read,  energy: 5.362e-12, latency: 1/(8*512e9)} #  DRAM internal bandwidth
+    - {name: write, energy: 4.382e-12, latency: 1/(8*512e9)}
+    tensors: {keep: ~Intermediates, may_keep: All} # keep all = no fusion, keep ~intermediates = fusion
+
+  - !Fork
+    nodes:
+    - !Toll
+      name: OffChipLink
+      leak_power: 0
+      direction: "up_and_down"
+      area: 0
+      tensors: {keep: All & Above}
+      actions: [{name: read, energy: 7.50e-12, latency: 1/(8*32e9)}] # DRAM external bandwidth, energy from Chirag paper (480pJ/ 64 bit)
+    - !Memory
+      name: TPU_GlobalBuffer
+      size: 1024 * 1024 * 128 * 8  # 128 MB
+      total_latency: max(read_latency, write_latency)
+      leak_power: 0
+      area: 112e-6  # 112 mm²
+      actions:
+      - {name: read,  energy: 1.88e-12, latency: 1 / (8 * 2048e9)}
+      - {name: write, energy: 2.36e-12, latency: 1 / (8 * 1024e9)}
+      tensors: {keep: ~MainMemory.tensors, may_keep: All}
+
+    - !Memory
+      name: TPU_LocalBuffer
+      spatial: [{name: Z, fanout: 4, may_reuse: Nothing, min_usage: 1}]
+      size: 1024 * 1024 * 4 * 8  # 4 MB
+      leak_power: 0
+      area: 50e-6  # 50 mm²
+      actions:
+      - {name: read,  energy: 0.249e-12, latency: 0}
+      - {name: write, energy: 0.293e-12, latency: 0}
+      tensors: {keep: input | output}
+
+    - !Compute
+      name: TPU_ScalarUnit
+      area: 10e-6
+      leak_power: 0
+      actions:
+      - {name: compute, energy: 0, latency: 1 / 1.05e9 / 128}
+      enabled: len(All) == 2
+
+    - !Container
+      name: ProcessingElement
+      spatial:
+      - {name: reuse_input, fanout: 128, may_reuse: input, reuse: input, min_usage: 1}
+      - {name: reuse_output, fanout: 128, may_reuse: output, reuse: output, min_usage: 1}
+
+    - !Memory
+      name: TPU_Register
+      size:  weight.bits_per_value if weight else 0
+      area: 1e-11
+      leak_power: 0
+      actions:
+      - {name: read,  energy: 0, latency: 0}
+      - {name: write, energy: 0, latency: 0}
+      tensors: {keep: weight}
+
+    - !Compute
+      name: TPU_MAC
+      leak_power: 0
+      area: 9e-11
+      actions:
+      - {name: compute, energy: 0.084e-12, latency: 1 / 1.05e9} # is this 16 bit or 8?
+      enabled: len(All) == 3 # 7 nm acording to wikipedia
+
+  # aim accelerator 
+  - !Memory
+    name: GlobalBuffer
+    size: 2 * 1024 * 8   # 2 KB gloabl buffer
+    component_class: SRAM 
+    tensors: {keep: ~Above, may_keep: All} # may_keep would help with energy
+    extra_attributes_for_component_model: {tech_node: 16e-9} # model as 32nm and scale to 16nm since CACTI doesn't support 
+    
+  - !Container
+    name: PU_Array # 16 x 16 in parallel
+    spatial:
+      - {name: reuse_input, fanout: 16, may_reuse: input, reuse: input, min_usage: 1}
+      - {name: reuse_output, fanout: 16}
+
+  - !Compute
+    name: PU_MAC
+    leak_power: 0
+    area: 0.19e-6 / 16 # 0.19 mm² / 16 PUs
+    actions:
+    # 32 GFLOP/s at 1GHz, 2 OPs is one MAC
+    - {name: compute, energy: 0.48e-12, latency: 1 / (1e9 * 16)}
+  
